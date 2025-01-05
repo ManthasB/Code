@@ -1,0 +1,1151 @@
+import os
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import csv
+import xml.etree.ElementTree as ET
+import json
+import re
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.ticker as ticker
+import seaborn as sns
+
+# Directory to store datasets
+# Replace this with the path of the folder in your Jupyter Notebook
+dataset_location = '\\\\userfs\\lwm527\\w2k\\Advanced Programming\\Datasets'
+
+def update_dropdown(new_file=None):
+    global dropdown_files, view_files, files, files2, file_var, file_var2
+    if new_file:
+        # Add the new file to the list of available files
+        files.append(new_file)
+        # Set the new file as the selected value in the first dropdown
+        file_var.set(new_file)
+        # Destroy the existing dropdown widget to recreate it with updated values
+        dropdown_files.destroy()  
+        # Create a new OptionMenu with the updated file list
+        dropdown_files = tk.OptionMenu(dropdown_frame, file_var, *files,
+                                      command=lambda event_a: selected_file(event=event_a, target_widget=content))
+        # Configure the appearance of the dropdown
+        dropdown_files.configure(bg='lightblue', relief='raised')
+        # Place the dropdown in the grid layout
+        dropdown_files.grid(row=9, column=0, sticky='N')
+
+    # Update the second dropdown for the "Manipulation" tab
+    files2 = find_files2()  # Get the list of files for manipulation
+    if len(files2) != 0:
+        # Set the first file in the list as the selected value
+        file_var2.set(files2[0]) 
+        # Destroy the existing dropdown widget
+        view_files.destroy()
+        # Create a new OptionMenu with the updated file list
+        view_files = tk.OptionMenu(options_frame, file_var2, *files2,
+                                  command=lambda event_b: selected_file(event=event_b, target_widget=manipulation_content))
+        # Configure the appearance of the dropdown
+        view_files.configure(bg='lightblue', relief='raised')
+        # Place the dropdown in the grid layout
+        view_files.grid(row=9, column=0, columnspan=2, sticky='N')
+
+def remove_unwanted_chars(name):
+    name = name.strip() # Remove leading and following spaces
+    name = name.upper() # Make the string UPPER case
+    name = re.sub(r'\s+', '_', name)  # Replace spaces with underscores
+    name = re.sub(r'[^A-Za-z0-9_-]', '_', name)  # Remove unwanted characters
+    return name
+
+def clean_date_time(string):
+    clean_string = re.sub(r'[^0-9/: ]', '', string)  # Remove unwanted characters
+    clean_string = re.sub(r'\s+', ' ', string).strip()  # Remove extra spaces
+    return clean_string
+
+def format_xml(element, level=0):
+    indent = "  "  # Two spaces for indentation
+    if len(element):
+        # Add indentation to the element's text and tail
+        element.text = f"\n{indent * (level + 1)}" if not element.text else element.text.strip()
+        # Recursively format child elements
+        for child in element:
+            format_xml(child, level + 1)
+        element.tail = f"\n{indent * level}" 
+    else:
+        # If the element has no children, just strip the text
+        element.text = element.text.strip() if element.text else None
+        element.tail = f"\n{indent * level}" 
+    return element
+
+def handle_missing_data(dataframe):
+    # Get a list of columns that have missing values (NaN).
+    missing_columns = dataframe.columns[dataframe.isnull().any()].tolist()
+    # Initialize a counter for the number of replaced values.
+    removed_or_replaced_count = 0  
+    # Iterate over each column with missing values.
+    for column in missing_columns:
+        # Count how many missing values are in the current column.
+        replaced_count = dataframe[column].isnull().sum()
+        # Fill all missing values in the column with the string "Unknown".
+        dataframe[column] = dataframe[column].fillna("Unknown")
+        # Update the total count of replaced values.
+        removed_or_replaced_count += replaced_count
+    return dataframe, removed_or_replaced_count
+
+def standardize_data(dataframe):
+    today = pd.Timestamp.today() # Get today's date.
+    too_old_date = pd.Timestamp('2022-01-01') # Define a cutoff date for old data.
+    removed_or_replaced_count = 0 # Initialize a counter.
+
+    # Iterate over each column in the DataFrame and standardize accordingly
+    for column in dataframe.columns:
+        if "DATE" in column:
+            dataframe[column] = dataframe[column].apply(lambda x: clean_date_time(str(x)))
+            dataframe[column] = pd.to_datetime(dataframe[column], format='%d/%m/%Y %H:%M', errors='coerce')
+            dataframe[column] = dataframe[column].apply(lambda x: x if (x >= too_old_date) & (x <= today) else pd.NaT)
+            replaced_count = dataframe[column].isna().sum()
+            dataframe[column] = dataframe[column].fillna("Unknown")
+            dataframe[column] = dataframe[column].apply(lambda x: x.strftime('%d/%m/%Y') if x != "Unknown" else x)
+            removed_or_replaced_count += replaced_count
+        elif "TIME" in column:
+            dataframe[column] = dataframe[column].apply(lambda x: clean_date_time(str(x)))
+            dataframe[column] = pd.to_datetime(dataframe[column], errors='coerce', format='%H:%M:%S')
+            replaced_count = dataframe[column].isna().sum()
+            dataframe[column] = dataframe[column].fillna("Unknown")
+            dataframe[column] = dataframe[column].apply(lambda x: x.strftime('%H:%M:%S') if x != "Unknown" else x)
+            removed_or_replaced_count += replaced_count
+        elif "USER_FULL_NAME__ANONYMIZED" in column:
+            replaced_count = dataframe[column].apply(lambda x: not(str(x).isnumeric() or str(x)=='Unknown')).sum()
+            dataframe[column] = dataframe[column].apply(lambda x: x if str(x).isnumeric() or str(x)=='Unknown' else 'Unknown')
+            removed_or_replaced_count += replaced_count
+        else:
+            dataframe[column] = dataframe[column].astype(str).apply(remove_unwanted_chars)
+            
+    return dataframe, removed_or_replaced_count
+
+def clean():
+    # Retrieve the currently selected file name from the dropdown
+    file_name = file_var.get()
+    file_path = os.path.join(dataset_location, file_name)  # Construct full file path
+    extension = os.path.splitext(file_name)[1].lower()  # Get file extension
+    clean_file_name = f"{os.path.splitext(file_name)[0]}_clean{extension}"  # Create cleaned file name
+    clean_file_path = os.path.join(dataset_location, clean_file_name)  # Construct cleaned file path
+    removed_or_replaced_count = 0  # Counter for data cleaning operations
+    continue_cleaning = True  # Flag to determine if cleaning should proceed
+    
+    # Check if the file has already been cleaned
+    if "clean" in file_name.lower():
+        messagebox.showerror("Error", "This file has already been cleaned.")
+        continue_cleaning = False
+
+    # Check if the cleaned file already exists
+    if os.path.exists(clean_file_path):
+        messagebox.showerror("Error", f"The cleaned file '{clean_file_name}' already exists.")
+        continue_cleaning = False
+
+    # Proceed with cleaning if no errors
+    if continue_cleaning:
+        try:
+            # Load the file based on its extension
+            if extension == ".csv":
+                df = pd.read_csv(file_path)  # Read CSV into a DataFrame
+            elif extension == ".json":
+                # Read JSON file and load into DataFrame
+                with open(file_path, 'r', encoding='utf-8') as json_file:
+                    data = json.load(json_file)
+                    df = pd.DataFrame(data["Records"] if "Records" in data else data)
+            elif extension == ".xml":
+                # Parse XML file and load into DataFrame
+                tree = ET.parse(file_path)
+                root = tree.getroot()
+                records = []
+                for record in root.findall("Record"):
+                    # Create dictionary for each XML record
+                    row = {child.tag: child.text.strip() if child.text else None for child in record}
+                    records.append(row)
+                df = pd.DataFrame(records)  # Convert list of records into a DataFrame
+            else:
+                # Unsupported file format error
+                raise ValueError("Unsupported file format for cleaning")
+
+            # Remove unwanted characters from column names
+            df.columns = [remove_unwanted_chars(col) for col in df.columns]
+            initial_row_count = len(df)  # Count the number of rows before cleaning
+        
+            # Replace missing data and count replaced values
+            df, missing_data_count = handle_missing_data(df)
+            removed_or_replaced_count += missing_data_count
+
+            # Validate and standardize data, count standardization changes
+            df, standardization_count = standardize_data(df)
+            removed_or_replaced_count += standardization_count
+            
+            # Replace or remove remaining invalid data
+            rows_na = df.isna().sum().sum()  # Count remaining missing data
+            df = df.fillna('Unknown')  # Replace missing values with 'Unknown'
+            removed_or_replaced_count += rows_na
+    
+            # Save cleaned file based on its original format
+            if extension == ".csv":
+                df.to_csv(clean_file_path, index=False)  # Save as CSV
+            elif extension == ".json":
+                # Convert DataFrame to JSON format and save
+                cleaned_data = df.to_dict(orient="records")
+                with open(clean_file_path, 'w', encoding='utf-8') as json_file:
+                    json.dump({"Records": cleaned_data}, json_file, indent=4)
+            elif extension == ".xml":
+                # Convert DataFrame to XML format and save
+                root = ET.Element("Records")
+                for index, row in df.iterrows():
+                    record = ET.SubElement(root, "Record")
+                    for col, value in row.items():
+                        child = ET.SubElement(record, col)
+                        child.text = str(value) if pd.notnull(value) else ""
+                format_xml(root)  # Format XML output
+                with open(clean_file_path, 'w', encoding='utf-8') as xml_file:
+                    xml_file.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+                    xml_file.write(ET.tostring(root, encoding="unicode", method="xml"))
+
+            # Update the dropdown menu and display success message
+            update_dropdown(clean_file_name)  # Add cleaned file to dropdown
+            selected_file(clean_file_name, target_widget=content)  # Automatically select cleaned file
+            messagebox.showinfo("Success", f"File '{file_name}' has been cleaned successfully!\n"
+                                          f"{removed_or_replaced_count} records have been replaced.")
+        except Exception as e:
+            # Handle any errors during the cleaning process
+            messagebox.showerror("Error", f"Failed to clean file: {e}")
+
+def save_as_xml():
+    # Get the selected file name from the dropdown
+    file_name = file_var.get()
+
+    # Check if the file is a CSV (only CSV files are allowed for conversion to XML)
+    if os.path.splitext(file_name)[1].lower() == '.csv':
+        csv_path = os.path.join(dataset_location, file_name)  # Construct full path of the CSV file
+        xml_file_name = os.path.splitext(file_name)[0] + ".xml"  # Define the XML file name
+        xml_path = os.path.join(dataset_location, xml_file_name)  # Construct full path of the XML file
+        
+        try:
+            # Open the CSV file and read its contents
+            with open(csv_path, 'r') as csv_file:
+                csv_reader = csv.reader(csv_file)
+                column_names = next(csv_reader)  # Read the column headers
+                root = ET.Element("Root")  # Create the root element for the XML file
+                
+                # Iterate over each row in the CSV file
+                for row in csv_reader:
+                    record = ET.SubElement(root, "Record")  # Create a "Record" element for each row
+                    for col_name, value in zip(column_names, row):
+                        # Create child elements for each column in the row
+                        child = ET.SubElement(record, remove_unwanted_chars(col_name))
+                        child.text = value  # Set the text of the child element to the cell value
+
+                # Format the XML for better readability
+                format_xml(root)
+                
+                # Write the XML content to the file
+                with open(xml_path, 'w', encoding='utf-8') as xml_file:
+                    xml_file.write('<?xml version="1.0" encoding="UTF-8"?>\n')  # Add XML declaration
+                    xml_file.write(ET.tostring(root, encoding="unicode", method="xml"))
+        
+            # Update the dropdown menu and automatically select the new XML file
+            update_dropdown(xml_file_name)
+            selected_file(xml_file_name, target_widget=content)
+            
+            # Show a success message
+            messagebox.showinfo("Success", f"File reshaped to XML format and saved as {xml_path}")
+        except Exception as e:
+            # Handle any errors during the conversion process
+            messagebox.showerror("Error", f"Failed to save as XML: {e}")
+    else:
+        # Display an error if the selected file is not a CSV
+        messagebox.showerror("Error", "Only CSV files are allowed for transformation")
+
+def save_as_json():
+    # Get the selected file name from the dropdown
+    file_name = file_var.get()
+
+    # Check if the file is a CSV (only CSV files are allowed for conversion to JSON)
+    if os.path.splitext(file_name)[1].lower() == '.csv':
+        csv_path = os.path.join(dataset_location, file_name)  # Construct full path of the CSV file
+        json_file_name = os.path.splitext(file_name)[0] + ".json"  # Define the JSON file name
+        json_path = os.path.join(dataset_location, json_file_name)  # Construct full path of the JSON file
+
+        try:
+            # Open the CSV file and read its contents
+            with open(csv_path, 'r') as csv_file:
+                csv_reader = csv.reader(csv_file)
+                column_names = next(csv_reader)  # Read the column headers
+                records = []
+
+                # Iterate over each row in the CSV file
+                for row in csv_reader:
+                    # Create a dictionary for each row, with column names as keys
+                    record = {remove_unwanted_chars(key): value for key, value in zip(column_names, row)}
+                    records.append(record)  # Add the dictionary to the list of records
+
+            # Prepare the data in JSON format
+            data = {"Records": records}
+
+            # Write the JSON content to the file
+            with open(json_path, 'w', encoding='utf-8') as json_file:
+                json.dump(data, json_file, indent=4)  # Save JSON with indentation for readability
+    
+            # Update the dropdown menu and automatically select the new JSON file
+            update_dropdown(json_file_name)
+            selected_file(json_file_name, target_widget=content)
+            
+            # Show a success message
+            messagebox.showinfo("Success", f"File reshaped to JSON format and saved as {json_path}")
+        except Exception as e:
+            # Handle any errors during the conversion process
+            messagebox.showerror("Error", f"Failed to save as JSON: {e}")
+    else:
+        # Display an error if the selected file is not a CSV
+        messagebox.showerror("Error", "Only CSV files are allowed for transformation")
+
+def selected_file(event=None, target_widget=None):
+    # Determine which widget to update (default to `manipulation_content` if not specified)
+    target_widget = target_widget if target_widget else manipulation_content
+
+    if target_widget == content:
+        # If the content widget is selected, set the selected file
+        file_selected = event if event else file_var.get()
+        selection_label.configure(text=f'SELECTED FILE: {file_selected}', background='lightgreen')
+        
+        # Show the clean, save-as-XML, and save-as-JSON buttons
+        clean_button.grid(row=22, column=0, padx=5, pady=5, sticky='EW')
+        xml_button.grid(row=22, column=1, padx=5, pady=5, sticky='EW')
+        json_button.grid(row=22, column=2, padx=5, pady=5, sticky='EW')
+    else:
+        # Otherwise, set the selected file for `manipulation_content`
+        file_selected = event if event else file_var2.get()
+        selection_label2.configure(text=f'SELECTED FILE: {file_selected}', background='lightgreen')
+    
+    file_path = os.path.join(dataset_location, file_selected)  # Construct full file path
+    extension = os.path.splitext(file_selected)[1].lower()  # Get the file extension
+
+    try:
+        # Load and display the file content in the target widget
+        target_widget.configure(state=tk.NORMAL)
+        target_widget.delete(1.0, tk.END)
+
+        if extension == '.csv':
+            # Read and display CSV content
+            with open(file_path, 'r') as file:
+                target_widget.insert(tk.END, file.read())
+        elif extension == '.xml':
+            # Read and display XML content
+            tree = ET.parse(file_path)
+            root = tree.getroot()
+            format_xml(root)  # Format XML for better readability
+            xml_declaration = '<?xml version="1.0" encoding="UTF-8"?>\n'
+            xml_string = f"{xml_declaration}{ET.tostring(root, encoding='unicode', method='xml')}"
+            target_widget.insert(tk.END, xml_string)
+        elif extension == '.json':
+            # Read and display JSON content
+            with open(file_path, 'r', encoding='utf-8') as file:
+                json_data = json.load(file)
+                json_string = json.dumps(json_data, indent=4)
+                target_widget.insert(tk.END, json_string)
+        else:
+            # Unsupported file format
+            target_widget.insert(tk.END, "Unsupported file format")
+        
+        # Make the target widget read-only
+        target_widget.configure(state=tk.DISABLED)
+    except Exception as e:
+        # Handle any errors during the file reading process
+        messagebox.showerror("Error", f"Failed to read file: {e}")
+
+# Function to upload a CSV file to the dataset location
+def upload_file():
+    # Open a file dialog to allow the user to select a file
+    file_path = filedialog.askopenfilename(title='Choose a File', filetypes=[("CSV Files", "*.csv")])
+
+    try:
+        # Copy the selected file to the dataset location
+        name = os.path.basename(file_path)  # Extract the file name from the path
+        destination = os.path.join(dataset_location, name)  # Construct destination path
+        with open(file_path, 'r') as chosen_file:
+            with open(destination, 'x') as destination_file:
+                destination_file.write(chosen_file.read())  # Copy the file contents
+        
+        # Update the dropdown menu with the new file
+        update_dropdown(name)
+        selected_file(name, target_widget=content)  # Automatically select the uploaded file
+        
+        # Show a success message
+        messagebox.showinfo("Upload Successful", f"File '{name}' uploaded successfully!")
+    except Exception as e:
+        # Handle any errors during the upload process
+        messagebox.showerror("Upload Failed", f"Failed to upload file: {e}")
+
+#GUI
+gui = tk.Tk()
+gui.title("File Manipulation")
+gui.geometry("1100x900")
+
+#Creating Tabs within the GUI
+notebook = ttk.Notebook(gui)
+notebook.pack(expand=True, fill="both")
+upload_tab = ttk.Frame(notebook)
+notebook.add(upload_tab, text="Upload")
+manipulation_tab = ttk.Frame(notebook)
+notebook.add(manipulation_tab, text="Manipulation")
+statistics_tab = ttk.Frame(notebook)
+notebook.add(statistics_tab, text="Statistics")
+
+# Styles
+style = ttk.Style()
+style.configure('TFrame', background='LightGray')
+style.configure('TLabel', background='White', relief='raised', font=('Arial', 10))
+style.configure('Custom.TLabel', font=('Arial', 10, 'bold'), background='LightGray', relief='flat')
+
+# Dropdown frame
+dropdown_frame = ttk.Frame(upload_tab, padding=10, relief="ridge")
+dropdown_frame.grid(row=0, column=0, padx=10, pady=10, sticky='NEWS')
+
+# Text frame
+text_frame = ttk.Frame(upload_tab, padding=10, relief="ridge")
+text_frame.grid(row=0, column=1, padx=10, pady=10, sticky='NEWS')
+
+# Text and Dropdown Grid configuration
+for i in range(0, 22):
+    dropdown_frame.rowconfigure(i, weight=1)
+    text_frame.rowconfigure(i, weight=1)
+dropdown_frame.columnconfigure(0, weight=1)
+for i in range(0, 3):
+    text_frame.columnconfigure(i, weight=1)
+
+# Dropdown label
+dropdown_label = ttk.Label(dropdown_frame, text="Choose a File", anchor='center', style='Custom.TLabel')
+dropdown_label.grid(row=8, column=0, padx=5, pady=5, sticky='EW')
+
+# Selected file label
+selection_label = ttk.Label(dropdown_frame, text='SELECTED FILE: ', anchor='center', background='white')
+selection_label.grid(row=11, column=0, padx=5, pady=5, sticky='EW')
+
+# Text label for file contents
+text_label = ttk.Label(text_frame, text="File Contents", anchor='center', relief="solid", borderwidth=1)
+text_label.grid(row=0, column=0, columnspan=3, padx=5, pady=5, sticky='NEWS')
+
+# Dropdown menu for file selection
+file_var = tk.StringVar()
+file_var.set("")
+files = [file for file in os.listdir(dataset_location) if os.path.isfile(os.path.join(dataset_location, file))]
+if not files:
+    dropdown_files = tk.OptionMenu(dropdown_frame, file_var, "")
+else:
+    dropdown_files = tk.OptionMenu(dropdown_frame, file_var, *files, 
+                                   command=lambda event_a: selected_file(event=event_a, target_widget=content))
+dropdown_files.configure(bg='lightblue', relief='raised')
+dropdown_files.grid(row=9, column=0, sticky='EW')
+
+# Text widget to display file contents
+content = tk.Text(text_frame, wrap=tk.WORD, state=tk.DISABLED, relief="solid", borderwidth=1)
+content.grid(row=1, column=0, columnspan=3, rowspan=20, padx=5, pady=5, sticky=tk.NSEW)
+
+# Upload button
+upload_button = tk.Button(dropdown_frame, text="Upload Your Own", command=upload_file, bg="lightblue", relief="raised")
+upload_button.grid(row=10, column=0, padx=5, pady=10, sticky='EW')
+
+# Clean and save buttons
+clean_button = tk.Button(text_frame, text="Clean Data", command=clean, bg="lightblue", relief="raised")
+xml_button = tk.Button(text_frame, text="Save as XML", command=save_as_xml, bg="lightblue", relief="raised")
+json_button = tk.Button(text_frame, text="Save as JSON", command=save_as_json, bg="lightblue", relief="raised")
+
+# Initially hide the buttons
+clean_button.grid_remove()
+xml_button.grid_remove()
+json_button.grid_remove()
+
+# Configure grid weights for the main window
+upload_tab.rowconfigure(0, weight=1)
+upload_tab.columnconfigure(0, weight=1)
+upload_tab.columnconfigure(1, weight=2)
+
+def format_selected():
+    update_dropdown()  # Refresh the dropdown menu with updated options.
+    selected_file(target_widget=manipulation_content)  # Display the content of the selected file.
+
+def find_files():
+    selected_format = format_var.get()  # Get the selected file format.
+    files_to_manipulate = []
+    for file in os.listdir(dataset_location):  # Iterate over files in the dataset directory.
+        if selected_format.lower() in file.lower() and 'clean' in file.lower():  # Match format and 'clean' keyword.
+            files_to_manipulate.append(os.path.join(dataset_location, file))  # Add matching files to the list.
+    return files_to_manipulate
+
+def find_files2():
+    selected_format = format_var.get()  # Get the selected file format.
+    files_to_show = []
+    for file in os.listdir(dataset_location):  # Iterate over files in the dataset directory.
+        if selected_format.lower() in file.lower() and 'clean' in file.lower():  # Match 'clean' files.
+            files_to_show.append(file)
+        elif selected_format.lower() in file.lower() and 'merged_dataset' in file.lower():  # Match merged files.
+            files_to_show.append(file)
+    return files_to_show
+
+def remove_records():
+    selected_format = format_var.get()  # Get the selected file format.
+    files_to_manipulate = find_files()  # Get files matching the criteria.
+    if len(files_to_manipulate) != 3:  # Ensure there are exactly three files to manipulate.
+        messagebox.showerror("Error", "Could not find exactly three 'clean' files for manipulation.")
+    else:
+        try:
+            user_df = None
+            user_path = None
+            user_data = None
+            indexes = None
+            for file_path in files_to_manipulate:
+                if selected_format == 'JSON':
+                    with open(file_path, 'r', encoding='utf-8') as json_file:
+                        data = json.load(json_file)  # Load JSON file data.
+                        df = pd.DataFrame(data["Records"] if "Records" in data else data)  # Convert to DataFrame.
+                        if 'COMPONENT' in df.columns and 'USER_FULL_NAME__ANONYMIZED' in df.columns:
+                            # Remove rows with 'SYSTEM' and 'FOLDER' in 'COMPONENT' column.
+                            activity_df_removed = df[~df['COMPONENT'].isin(['SYSTEM', 'FOLDER'])]
+                            indexes = df[~df['COMPONENT'].isin(['SYSTEM', 'FOLDER'])].index
+                            data["Records"] = activity_df_removed.to_dict(orient="records")
+                        elif 'COMPONENT' not in df.columns and 'USER_FULL_NAME__ANONYMIZED' in df.columns:
+                            # Store user-specific data and path for later processing.
+                            user_df = df
+                            user_data = data
+                            user_path = file_path
+                        elif 'COMPONENT' in df.columns and 'USER_FULL_NAME__ANONYMIZED' not in df.columns:
+                            # Remove rows with 'SYSTEM' and 'FOLDER' for other files.
+                            codes_df_removed = df[~df['COMPONENT'].isin(['SYSTEM', 'FOLDER'])]
+                            data["Records"] = codes_df_removed.to_dict(orient="records")
+                        if file_path != user_path:
+                            with open(file_path, "w") as file:
+                                json.dump(data, file, indent=4)  # Save updated JSON data.
+                elif selected_format == 'XML':
+                    df = pd.read_xml(file_path)  # Read XML file into DataFrame.
+                    if 'COMPONENT' in df.columns and 'USER_FULL_NAME__ANONYMIZED' in df.columns:
+                        # Filter out rows with specific 'COMPONENT' values.
+                        df = df[~df['COMPONENT'].isin(['SYSTEM', 'FOLDER'])]
+                        indexes = df[~df['COMPONENT'].isin(['SYSTEM', 'FOLDER'])].index
+                    elif 'COMPONENT' not in df.columns and 'USER_FULL_NAME__ANONYMIZED' in df.columns:
+                        # Store user-specific data and path for later processing.
+                        user_df = df
+                        user_path = file_path
+                    elif 'COMPONENT' in df.columns and 'USER_FULL_NAME__ANONYMIZED' not in df.columns:
+                        # Filter out rows for other files.
+                        df = df[~df['COMPONENT'].isin(['SYSTEM', 'FOLDER'])]
+                    if file_path != user_path:
+                        df.to_xml(file_path, index=False, root_name='Records', row_name='Record')  # Save XML.
+
+            if user_df is not None and indexes is not None:
+                # Update user-specific file based on filtered indexes.
+                user_df = user_df.loc[indexes]
+                if selected_format == 'JSON':
+                    user_data["Records"] = user_df.to_dict(orient="records")
+                    with open(user_path, "w") as file:
+                        json.dump(user_data, file, indent=4)
+                elif selected_format == 'XML':
+                    user_df.to_xml(user_path, index=False, root_name='Records', row_name='Record')
+                    
+            messagebox.showinfo("Success", "Records removed successfully!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to remove records: {e}") 
+
+def rename():
+    selected_format = format_var.get()  # Get the selected file format.
+    files_to_manipulate = find_files()  # Get files matching the criteria.
+    if len(files_to_manipulate) != 3:  # Ensure there are exactly three files to manipulate.
+        messagebox.showerror("Error", "Could not find exactly three 'clean' files for manipulation.")
+    else:
+        try: 
+            for file_path in files_to_manipulate:
+                if selected_format == 'JSON':
+                    with open(file_path, 'r', encoding='utf-8') as json_file:
+                        data = json.load(json_file)  # Load JSON file data.
+                        dataframe = pd.DataFrame(data["Records"] if "Records" in data else data)  # Convert to DataFrame.
+                        if 'USER_FULL_NAME__ANONYMIZED' in dataframe.columns:
+                            # Rename the column 'USER_FULL_NAME__ANONYMIZED' to 'USER_ID'.
+                            dataframe.rename(columns={'USER_FULL_NAME__ANONYMIZED': 'USER_ID'}, inplace=True)
+                            data["Records"] = dataframe.to_dict(orient="records")
+                    with open(file_path, "w") as file:
+                        json.dump(data, file, indent=4)  # Save updated JSON data.
+                elif selected_format == 'XML':
+                    dataframe = pd.read_xml(file_path)  # Read XML file into DataFrame.
+                    if 'USER_FULL_NAME__ANONYMIZED' in dataframe.columns:
+                        # Rename the column 'USER_FULL_NAME__ANONYMIZED' to 'USER_ID'.
+                        dataframe.rename(columns={'USER_FULL_NAME__ANONYMIZED': 'USER_ID'}, inplace=True)
+                        dataframe.to_xml(file_path, index=False, root_name='Records', row_name='Record')  # Save XML.
+
+            messagebox.showinfo("Success", "Records renamed successfully!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to rename records: {e}")
+
+def merge():
+    selected_format = format_var.get()  # Get selected file format.
+    files_to_manipulate = find_files()  # Fetch files for processing.
+    merged_file_name = f"merged_dataset.{selected_format.lower()}"  # Create merged file name.
+    merged_file_path = os.path.join(dataset_location, merged_file_name)  # Generate full file path.
+
+    # Check if merged file already exists.
+    if os.path.exists(merged_file_path):
+        messagebox.showinfo("Info", f"The merged file '{merged_file_name}' already exists.")
+    else:
+        try:
+            activity_df = None  # Placeholder for activity data.
+            user_df = None  # Placeholder for user data.
+
+            # Process files based on selected format.
+            for file_path in files_to_manipulate:
+                if selected_format == 'JSON':
+                    with open(file_path, 'r', encoding='utf-8') as json_file:
+                        data = json.load(json_file)
+                        df = pd.DataFrame(data["Records"] if "Records" in data else data)
+                        # Assign to activity or user DataFrame based on columns.
+                        if 'COMPONENT' in df.columns and 'USER_ID' in df.columns:
+                            activity_df = df
+                        elif 'COMPONENT' not in df.columns and 'USER_ID' in df.columns:
+                            user_df = df
+                elif selected_format == 'XML':
+                    df = pd.read_xml(file_path)
+                    # Assign to activity or user DataFrame based on columns.
+                    if 'COMPONENT' in df.columns and 'USER_ID' in df.columns:
+                        activity_df = df
+                    elif 'COMPONENT' not in df.columns and 'USER_ID' in df.columns:
+                        user_df = df
+
+            # Ensure both DataFrames are available.
+            if activity_df is None or user_df is None:
+                raise ValueError("Both file columns have not been renamed yet.")
+
+            # Merge activity and user DataFrames.
+            merged_df = pd.merge(user_df, activity_df, left_index=True, right_index=True, how='right')
+            # Resolve conflicting USER_ID columns.
+            merged_df['USER_ID'] = merged_df.apply(lambda x: x['USER_ID_y'] if x['USER_ID_y'] != 'Unknown' 
+                                                   else x['USER_ID_x'], axis=1)
+            merged_df.drop(columns=['USER_ID_x', 'USER_ID_y'], inplace=True)
+
+            # Save merged data based on selected format.
+            if selected_format == 'JSON':
+                merged_data = {"Records": merged_df.to_dict(orient="records")}
+                with open(merged_file_path, "w") as file:
+                    json.dump(merged_data, file, indent=4)
+            elif selected_format == 'XML':
+                merged_df.to_xml(merged_file_path, index=False, root_name='Records', row_name='Record')
+
+            update_dropdown(merged_file_name)  # Update UI with new file.
+            messagebox.showinfo("Success", "Logs merged successfully!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to merge records: {e}")
+
+def reshape():
+    selected_format = format_var.get()  # Get the selected file format.
+    merged_file_name = f"merged_dataset.{selected_format.lower()}"  # Define merged file name.
+    merged_file_path = os.path.join(dataset_location, merged_file_name)  # Get path for merged file.
+    reshaped_file_name = f"merged_dataset_wide.{selected_format.lower()}"  # Define reshaped file name.
+    reshaped_file_path = os.path.join(dataset_location, reshaped_file_name)  # Get path for reshaped file.
+
+    # Check if the merged file exists.
+    if os.path.exists(merged_file_path):
+        try:
+            if selected_format == 'JSON':
+                pivoted_df = None  # Placeholder for reshaped DataFrame.
+
+                # Load merged JSON file into DataFrame.
+                with open(merged_file_path, 'r', encoding='utf-8') as json_file:
+                    data = json.load(json_file)
+                    df = pd.DataFrame(data["Records"] if "Records" in data else data)
+
+                    # Add a 'MONTH' column by parsing the 'DATE' column.
+                    df['MONTH'] = pd.to_datetime(df['DATE'], format='%d/%m/%Y').dt.to_period('M')
+
+                    # Reshape data using a pivot table.
+                    pivoted_df = df.pivot_table(
+                        index=['USER_ID', 'MONTH', 'COMPONENT'],
+                        values=['TIME', 'ACTION', 'TARGET'],
+                        aggfunc=lambda x: list(x)
+                    ).reset_index()
+
+                # Create JSON structure for reshaped data.
+                output = {"Records": []}
+                for index, group in pivoted_df.groupby(['USER_ID', 'MONTH']):
+                    user_id = group['USER_ID'].iloc[0]
+                    date_month = group['MONTH'].iloc[0].strftime('%Y-%m')
+                    components = []
+
+                    # Group and format component interactions.
+                    for index, row in group.iterrows():
+                        component_name = row['COMPONENT']
+                        interactions = [
+                            {f"USE{i+1}": {"TIME": time, "ACTION": action, "TARGET": target}}
+                            for i, (time, action, target) in enumerate(zip(row['TIME'], row['ACTION'], row['TARGET']))
+                        ]
+                        components.append({component_name: interactions})
+
+                    # Append user records to the JSON output.
+                    output["Records"].append({"USER_ID": user_id,"DATE": date_month,"COMPONENTS": components})
+
+                # Write reshaped data to JSON file.
+                with open(reshaped_file_path, "w") as file:
+                    json.dump(output, file, indent=4)
+
+            elif selected_format == 'XML':
+                # Load merged XML file into DataFrame.
+                df = pd.read_xml(merged_file_path)
+
+                # Add a 'MONTH' column by parsing the 'DATE' column.
+                df['MONTH'] = pd.to_datetime(df['DATE'], format='%d/%m/%Y').dt.to_period('M')
+
+                # Reshape data using a pivot table.
+                pivoted_df = df.pivot_table(
+                    index=['USER_ID', 'MONTH', 'COMPONENT'],
+                    values=['TIME', 'ACTION', 'TARGET'],
+                    aggfunc=lambda x: list(x)
+                ).reset_index()
+
+                # Create XML structure for reshaped data.
+                root = ET.Element('Records')
+                for index, group in pivoted_df.groupby(['USER_ID', 'MONTH']):
+                    user_id = group['USER_ID'].iloc[0]
+                    date_month = group['MONTH'].iloc[0].strftime('%Y-%m')
+                    
+                    # Create XML record for each user and month.
+                    record = ET.SubElement(root, "Record")
+                    user_id_elem = ET.SubElement(record, "USER_ID")
+                    user_id_elem.text = str(user_id)
+                    date_elem = ET.SubElement(record, "DATE")
+                    date_elem.text = date_month
+                    components_elem = ET.SubElement(record, "COMPONENTS")
+
+                    # Add component interactions to the XML.
+                    for index, row in group.iterrows():
+                        component_name = row['COMPONENT']
+                        component_elem = ET.SubElement(components_elem, component_name)
+                        for i, (time, action, target) in enumerate(zip(row['TIME'], row['ACTION'], row['TARGET'])):
+                            use_elem = ET.SubElement(component_elem, f"USE{i+1}")
+                            time_elem = ET.SubElement(use_elem, "TIME")
+                            time_elem.text = time
+                            action_elem = ET.SubElement(use_elem, "ACTION")
+                            action_elem.text = action
+                            target_elem = ET.SubElement(use_elem, "TARGET")
+                            target_elem.text = target
+
+                # Format and save reshaped data to XML file.
+                format_xml(root)
+                tree = ET.ElementTree(root)
+                tree.write(reshaped_file_path, encoding="utf-8", xml_declaration=True)
+
+            update_dropdown(reshaped_file_name)  # Update UI with the reshaped file.
+            messagebox.showinfo("Success", "Merged data reshaped successfully!")
+        except Exception as e:
+            # Handle errors during reshaping.
+            messagebox.showerror("Error", f"Failed to reshape the data: {e}")
+    else:
+        # Notify user if the merged file doesn't exist.
+        messagebox.showinfo("Info", f"The merged file '{merged_file_name}' does not exist.")
+        
+def count():
+    selected_format = format_var.get()  # Get the selected file format.
+    wide_file_name = f"merged_dataset_wide.{selected_format.lower()}"  # Define wide file name.
+    wide_file_path = os.path.join(dataset_location, wide_file_name)  # Get path for wide file.
+
+    # Check if the wide file exists.
+    if os.path.exists(wide_file_path):
+        try:
+            if selected_format == 'JSON':
+                # Load the wide JSON file into a Python dictionary.
+                with open(wide_file_path, 'r', encoding='utf-8') as json_file:
+                    data = json.load(json_file)
+                output = data["Records"]
+                # Check if counts already exist in the data.
+                for record in output:
+                    components = record['COMPONENTS']
+                    for component in components:
+                        for name, interactions in list(component.items()):
+                            if name == 'COUNT':
+                                messagebox.showinfo("Info", "Counts already exist!")  # Inform user counts are present.
+                                return  
+                # Add count of interactions for each component.
+                for record in output:
+                    components = record['COMPONENTS']
+                    for component in components:
+                        for name, interactions in list(component.items()):
+                            component['COUNT'] = len(interactions)  # Set count for component.
+                # Write the updated data back to the JSON file.
+                with open(wide_file_path, "w") as file:
+                    json.dump(output, file, indent=4)
+
+            elif selected_format == 'XML':
+                # Parse the wide XML file and get the root element.
+                tree = ET.parse(wide_file_path)
+                root = tree.getroot()
+                # Check if counts already exist in XML elements.
+                for record in root.findall('Record'):
+                    components_elem = record.find('COMPONENTS')
+                    if components_elem is not None:
+                        for component_elem in components_elem:
+                            if component_elem.find('COUNT') is not None:
+                                messagebox.showinfo("Info", "Counts already exist!")  # Inform user counts are present.
+                                return
+                # Add count of child elements (interactions) for each component in XML.
+                for record in root.findall('Record'):
+                    components_elem = record.find('COMPONENTS')
+                    if components_elem is not None:
+                        for component_elem in components_elem:
+                            count = len(component_elem.findall('*'))  # Get interaction count.
+                            count_elem = ET.SubElement(component_elem, 'COUNT')  # Add count as new element.
+                            count_elem.text = str(count)
+
+                # Format and save updated XML data.
+                format_xml(root)
+                with open(wide_file_path, 'w', encoding='utf-8') as xml_file:
+                    xml_file.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+                    xml_file.write(ET.tostring(root, encoding="unicode", method="xml"))
+
+            # Update UI and inform user of success.
+            info_label = ttk.Label(text_frame2, text="Proceed to Statistics Tab to produce Statistics and Correlation",
+                                  anchor='center', relief="solid", borderwidth=1, background='lightgreen')
+            info_label.grid(row=21, column=0, padx=5, pady=5, sticky='NEWS')
+
+            update_stat_dropdown()  # Update dropdown with new stats.
+            messagebox.showinfo("Success", "Monthly counts have been added successfully!")
+
+        except Exception as e:
+            # Handle errors during count addition.
+            messagebox.showerror("Error", f"Failed to add counts: {e}")
+    else:
+        # Notify user if the wide file doesn't exist.
+        messagebox.showinfo("Info", f"The wide file '{wide_file_name}' does not exist.")
+
+# Options frame to hold the buttons
+options_frame = ttk.Frame(manipulation_tab, padding=10, relief="ridge")
+options_frame.grid(row=0, column=0, padx=10, pady=10, sticky='NEWS')
+
+# Text frame to hold the contents
+text_frame2 = ttk.Frame(manipulation_tab, padding=10, relief="ridge")
+text_frame2.grid(row=0, column=1, padx=10, pady=10, sticky='NEWS')
+
+# Configuring frame layouts
+for i in range(0, 22):
+    options_frame.rowconfigure(i, weight=1)
+    text_frame2.rowconfigure(i, weight=1)
+for i in range(0, 2):
+    options_frame.columnconfigure(i, weight=1)
+text_frame2.columnconfigure(0, weight=1)
+
+# Text label for file contents
+manipulation_label = ttk.Label(text_frame2, text="File Contents", anchor='center', relief="solid", borderwidth=1)
+manipulation_label.grid(row=0, column=0, padx=5, pady=5, sticky='NEWS')
+
+# Text widget to display manipulation contents
+manipulation_content = tk.Text(text_frame2, wrap=tk.WORD, state=tk.DISABLED, relief="solid", borderwidth=1)
+manipulation_content.grid(row=1, column=0, rowspan=20, padx=5, pady=5, sticky="NEWS")
+
+# Format label
+format_label = ttk.Label(options_frame, text="Choose Output Format:", anchor='center', style='Custom.TLabel')
+format_label.grid(row=7, column=0, columnspan=2, padx=5, pady=5, sticky='EW')
+
+# Radiobuttons for selecting format
+format_var = tk.StringVar(value="JSON")
+json_button2 = tk.Radiobutton(options_frame, text="JSON", variable=format_var, value="JSON", command=format_selected)
+xml_button2 = tk.Radiobutton(options_frame, text="XML", variable=format_var, value="XML", command=format_selected)
+json_button2.grid(row=8, column=0, sticky="EW", padx=5, pady=2)
+xml_button2.grid(row=8, column=1, sticky="EW", padx=5, pady=2)
+
+# Dropdown menu for file viewing
+file_var2 = tk.StringVar()
+file_var2.set("")
+files2 = find_files2()
+if len(files2) == 0:
+    view_files = tk.OptionMenu(options_frame, file_var2, "")
+else:
+    view_files = tk.OptionMenu(options_frame, file_var2, *files2, 
+                               command=lambda event_b: selected_file(event=event_b, target_widget=manipulation_content))
+view_files.configure(bg='lightblue', relief='raised')
+view_files.grid(row=9, column=0, columnspan=2, sticky='EW')
+
+# Selected file label
+selection_label2 = ttk.Label(options_frame, text='SELECTED FILE: ', anchor='center', background='white')
+selection_label2.grid(row=10, column=0, columnspan=2, padx=5, pady=5, sticky='EW')
+
+# Remove button
+remove_button = tk.Button(options_frame, text="REMOVE", command=remove_records, bg="lightblue", relief="raised")
+remove_button.grid(row=11, column=0, columnspan=2, sticky="EW", padx=5, pady=10)
+
+#Rename button
+rename_button = tk.Button(options_frame, text="RENAME", command=rename, bg="lightblue", relief="raised")
+rename_button.grid(row=12, column=0, columnspan=2, sticky="EW", padx=5, pady=10)
+
+#Merge button
+merge_button = tk.Button(options_frame, text="MERGE", command=merge, bg="lightblue", relief="raised")
+merge_button.grid(row=13, column=0, columnspan=2, sticky="EW", padx=5, pady=10)
+
+# Reshape button
+reshape_button = tk.Button(options_frame, text="RESHAPE", command=reshape, bg="lightblue", relief="raised")
+reshape_button.grid(row=14, column=0, columnspan=2, sticky="EW", padx=5, pady=10)
+
+#Count button
+count_button = tk.Button(options_frame, text="COUNT", command=count, bg="lightblue", relief="raised")
+count_button.grid(row=15, column=0, columnspan=2, sticky="EW", padx=5, pady=10)
+
+# Configure grid weights for the main window
+manipulation_tab.rowconfigure(0, weight=1)
+manipulation_tab.columnconfigure(0, weight=1)
+manipulation_tab.columnconfigure(1, weight=2)
+
+def update_stat_dropdown():
+    global wide_dropdown
+    # Get the list of wide files in the dataset location.
+    wide_files = [file for file in os.listdir(dataset_location) 
+                  if os.path.isfile(os.path.join(dataset_location, file)) 
+                  and file.startswith('merged_dataset_wide.')]
+
+    # Destroy the previous dropdown and reset its value.
+    wide_dropdown.destroy()
+    wide_file.set("")
+    
+    # Create a new dropdown with the wide files if any exist.
+    if wide_files:
+        wide_dropdown = tk.OptionMenu(dropdown_frame2, wide_file, *wide_files)
+    else:
+        wide_dropdown = tk.OptionMenu(dropdown_frame2, wide_file, "")
+    # Customize the dropdown appearance and add it to the grid.
+    wide_dropdown.configure(bg='lightblue', relief='raised')
+    wide_dropdown.grid(row=10, column=0, sticky='EW')
+
+def extract_statistics(event=None):
+    # Get the file name from the event or dropdown.
+    file_selected = event if event else wide_file.get()
+    file_path = os.path.join(dataset_location, file_selected)
+    
+    # Check if the file exists.
+    if os.path.exists(file_path):
+        records = []
+        try:
+            extension = os.path.splitext(file_selected)[1].lower()
+            # Handle JSON files: load data and process it.
+            if extension == '.json':
+                with open(file_path, 'r', encoding='utf-8') as json_file:
+                    data = json.load(json_file)
+                for record in data:
+                    user_id = record['USER_ID']
+                    date = record['DATE']
+                    for component in record['COMPONENTS']:
+                        if component == component['COUNT']:
+                            continue
+                        for name, interactions in component.items():
+                            count = component['COUNT']
+                            if isinstance(interactions, list):
+                                for interaction in interactions:
+                                    if not any(d['USER_ID'] == user_id and d['DATE'] == date 
+                                               and d['COMPONENT'] == name for d in records):
+                                        records.append({ 'USER_ID': user_id, 'DATE': date,
+                                                        'COMPONENT': name, 'COUNT': count })
+                            else:
+                                if not any(d['USER_ID'] == user_id and d['DATE'] == date 
+                                           and d['COMPONENT'] == name for d in records):
+                                    records.append({ 'USER_ID': user_id, 'DATE': date, 
+                                                    'COMPONENT': name, 'COUNT': count })
+            # Handle XML files: parse and process data.
+            elif extension == '.xml':
+                tree = ET.parse(file_path)
+                root = tree.getroot()
+                for record in root.findall('Record'):
+                    user_id = record.find('USER_ID').text
+                    date = record.find('DATE').text
+                    components= record.find('COMPONENTS')
+                    if components is not None:
+                        for component in components:
+                            name = component.tag
+                            if name == 'COUNT':
+                                continue
+                            count = int(component.find('COUNT').text) if component.find('COUNT') is not None else 0
+                            for interaction in component:
+                                if interaction.tag != 'COUNT':
+                                    if not any(d['USER_ID'] == user_id and d['DATE'] == date 
+                                               and d['COMPONENT'] == name for d in records):
+                                        records.append({'USER_ID': user_id, 'DATE': date, 
+                                                        'COMPONENT': name, 'COUNT': count})
+            # Return the processed data as a DataFrame if records are found.
+            if records:
+                df = pd.DataFrame(records)
+                return df
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to extract statistics: {e}")
+        return df
+    else:
+        # Notify user if the file does not exist.
+        messagebox.showinfo("Info", f"File '{file_selected}' does not exist.")
+
+def create_table(parent, data, title):
+    # Create and display a table with the given data in the parent container.
+    title_label = tk.Label(parent, text=title, font=('Arial', 10, 'bold'), bg="lightgrey")
+    title_label.pack(fill=tk.BOTH, padx=5, pady=5)
+    tree = ttk.Treeview(parent, columns=list(data.columns), show='headings', height=5)
+    
+    # Set up column headings.
+    for col in data.columns:
+        tree.heading(col, text=col)
+        tree.column(col, width=30, anchor=tk.CENTER)
+    
+    # Insert the data into the table.
+    for index, row in data.iterrows():
+        tree.insert("", "end", values=list(row))
+    
+    tree.pack(fill=tk.BOTH, padx=5, pady=5)
+    return tree
+
+def create_bar_chart(df, title, parent):
+    # Group data by date and component, and sum the counts.
+    df_grouped = df.groupby(['DATE', 'COMPONENT'])['COUNT'].sum().unstack(fill_value=0)
+    
+    # Create a stacked bar chart.
+    fig, ax = plt.subplots(figsize=(4, 4))
+    df_grouped.plot(kind='bar', stacked=True, ax=ax, colormap='Set3')
+
+    # Set chart title and axis labels.
+    ax.set_title(title)
+    ax.set_xlabel("Month")
+    ax.set_ylabel("Number of Interactions")
+    ax.legend(title="Component")
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{int(x):,}'))
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
+    
+    # Display the chart in the parent container.
+    canvas = FigureCanvasTkAgg(fig, master=parent)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+def output_statistics():
+    try:
+        # Extract statistics and generate the output if successful.
+        df = extract_statistics()
+        if df is not None or not df.empty:
+            components = ['QUIZ', 'LECTURE', 'ASSIGNMENT', 'ATTENDENCE', 'SURVEY']
+            df_components = df[df['COMPONENT'].isin(components)]
+            
+            # Calculate statistics per month.
+            stats_per_month = (
+                df_components.groupby(['DATE', 'COMPONENT'])['COUNT']
+                .agg(MEAN='mean', MEDIAN='median', MODE=lambda x: x.mode().iloc[0] if not x.mode().empty else None)
+                .reset_index())
+            stats_per_month['MEAN'] = stats_per_month['MEAN'].round(1)
+            # Calculate overall statistics.
+            stats_overall = (
+                df_components.groupby(['COMPONENT'])['COUNT']
+                .agg(MEAN='mean', MEDIAN='median', MODE=lambda x: x.mode().iloc[0] if not x.mode().empty else None)
+                .reset_index())
+            stats_overall['MEAN'] = stats_overall['MEAN'].round(1)
+
+            # Clear previous widgets and display the statistics.
+            for widget in output_frame.winfo_children():
+                widget.destroy()
+            create_table(output_frame, stats_per_month, "Statistics per Month")
+            create_table(output_frame, stats_overall, "Statistics per Semester")
+            create_bar_chart(df_components, "All Interactions per Component", output_frame)
+            
+            messagebox.showinfo("Success", "Statistics have been generated!")
+        else:
+            messagebox.showerror("Error", "Failed to extract statistics")
+    except Exception as e:
+        messagebox.showerror("Error", "Failed to generate statistics")
+
+def output_correlation():
+    try:
+        # Extract statistics and generate correlation matrix if successful.
+        df = extract_statistics()
+        if df is not None or not df.empty:
+            components = ['QUIZ', 'LECTURE', 'ASSIGNMENT', 'ATTENDENCE', 'SURVEY']
+            df_components = df[df['COMPONENT'].isin(components)]
+            
+            # Create pivot table and correlation matrix.
+            pivot_table = df_components.pivot_table(index='USER_ID', columns='COMPONENT', 
+                                                  values='COUNT', aggfunc='sum', fill_value=0)
+            pivot_table = pivot_table.reset_index()
+            correlation_matrix = pivot_table.corr()
+            
+            # Create and display the heatmap for correlation.
+            fig, ax = plt.subplots(figsize=(8, 7))
+            sns.heatmap(correlation_matrix, annot=True, fmt=".2f", cmap='coolwarm', ax=ax)
+            
+            # Clear previous widgets and display the correlation heatmap.
+            for widget in output_frame.winfo_children():
+                widget.destroy()
+            canvas = FigureCanvasTkAgg(fig, master=output_frame) 
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            
+            # Generate a summary of significant correlations.
+            summary_text = "Correlation Summary:\n"
+            significant_correlations = []
+            
+            user_id_correlations = correlation_matrix['USER_ID'].drop('USER_ID')
+            for component, correlation in user_id_correlations.items():
+                if abs(correlation) >= 0.7:
+                    significant_correlations.append(f"Significant correlation between USER_ID and {component}: {correlation:.2f}")
+            if significant_correlations:
+                summary_text += "\n".join(significant_correlations)
+            else:
+                summary_text += "No significant correlations found between USER_ID and COMPONENTS."
+            summary_label = tk.Label(output_frame, text=summary_text, anchor="w", 
+                                     justify="left", font=("Arial", 10))
+            summary_label.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            
+            messagebox.showinfo("Success", "Correlation has been generated!")
+        else:
+            messagebox.showerror("Error", "Failed to extract statistics")
+    except Exception as e:
+        messagebox.showerror("Error", "Failed to generate correlation")
+
+# Dropdown frame
+dropdown_frame2 = ttk.Frame(statistics_tab, padding=10, relief="ridge")
+dropdown_frame2.grid(row=0, column=0, padx=10, pady=10, sticky='NEWS')
+
+#Text frame
+text_frame3 = ttk.Frame(statistics_tab, padding=10, relief="ridge")
+text_frame3.grid(row=0, column=1, padx=10, pady=10, sticky='NEWS')
+
+# Canvas widget
+output_frame = tk.Canvas(text_frame3, bg='white', relief="ridge")
+output_frame.grid(row=1, rowspan=20, column=0, padx=10, pady=10, sticky='NEWS')
+
+# Output label
+outputs_label = ttk.Label(text_frame3, text="File Outputs", anchor='center', relief="solid", borderwidth=1)
+outputs_label.grid(row=0, column=0, padx=5, pady=5, sticky='NEWS')
+
+# Confihure frame weights
+for i in range(0, 22):
+    dropdown_frame2.rowconfigure(i, weight=1)
+    text_frame3.rowconfigure(i, weight=1)
+dropdown_frame2.columnconfigure(0, weight=1)
+text_frame3.columnconfigure(0, weight=1)
+
+# Configure the tab weights
+statistics_tab.rowconfigure(0, weight=1)
+statistics_tab.columnconfigure(0, weigh=1)
+statistics_tab.columnconfigure(1, weigh=2)
+
+# Options label
+format_label2 = ttk.Label(dropdown_frame2, text="Choose A File:", anchor='center', style='Custom.TLabel')
+format_label2.grid(row=9, column=0, columnspan=2, padx=5, pady=5, sticky='EW')
+
+# Creating a dropdown of files used for statistics
+wide_file = tk.StringVar()
+wide_file.set("")
+wide_files = [file for file in os.listdir(dataset_location) if os.path.isfile(os.path.join(dataset_location, file))
+              and file.startswith('merged_dataset_wide.')]
+if not wide_files:
+    wide_dropdown = tk.OptionMenu(dropdown_frame2, wide_file, "")
+else:
+    wide_dropdown = tk.OptionMenu(dropdown_frame2, wide_file, *wide_files)
+wide_dropdown.configure(bg='lightblue', relief='raised')
+wide_dropdown.grid(row=10, column=0, sticky='EW')
+
+# Statistics button
+statistics_button = tk.Button(dropdown_frame2, text="OUTPUT STATISTICS", command=output_statistics, 
+                              bg="lightblue", relief="raised")
+statistics_button.grid(row=11, column=0, sticky="EW", padx=5, pady=10)
+
+# Correlation button
+correlation_button = tk.Button(dropdown_frame2, text="OUTPUT CORRELATION", command=output_correlation, 
+                               bg="lightblue", relief="raised")
+correlation_button.grid(row=12, column=0, sticky="EW", padx=5, pady=10)
+
+# Run the GUI
+gui.mainloop()
+
